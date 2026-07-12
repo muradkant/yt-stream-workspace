@@ -29,4 +29,4 @@ YTWS_TEST_RTMP_PORT=19350
 YTWS_YOUTUBE_RTMPS_URL=rtmps://a.rtmps.youtube.com/live2
 
 # Optional wallpaper on the virtual output, if swaybg is installed.
-YTWS_WALLPAPER="$HOME/Pictures/background.png"
+YTWS_WALLPAPER="$HOME/Pictures/background.jpg"
