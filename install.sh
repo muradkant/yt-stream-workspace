@@ -5,6 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-stream-workspace"
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+HYPR_SOURCE_MARKER="$CONFIG_DIR/hypr-source-added"
 FORCE=0
 INSTALL_DEPS=0
 HYPR_SOURCE=0
@@ -69,6 +70,7 @@ if [[ "$HYPR_SOURCE" == 1 ]]; then
         BACKUP="$HYPR_CONF.yt-stream-workspace.bak.$(date +%Y%m%d-%H%M%S)"
         cp "$HYPR_CONF" "$BACKUP"
         printf '\n# yt-stream-workspace\n%s\n' "$SOURCE_LINE" >>"$HYPR_CONF"
+        : >"$HYPR_SOURCE_MARKER"
         printf 'Added Hyprland source line to %s\n' "$HYPR_CONF"
         printf 'Backup: %s\n' "$BACKUP"
     fi

@@ -1,64 +1,56 @@
 # Architecture
 
-`yt-stream-workspace` creates a second Hyprland output and records that output
-explicitly.
-
 ```text
-apps on stream workspace
-        │
-        ▼
-Hyprland workspace N ──moved to──▶ headless output YT-STREAM
-        │                              │
-        │                              ├─ wf-recorder -o YT-STREAM ─▶ RTMP/RTMPS
-        │                              │
-        │                              └─ wl-mirror preview window
-        │                                      │
-        ▼                                      ▼
-private physical workspaces ◀──────── physical monitor eDP/HDMI/etc.
+applications
+    │
+    ▼
+workspace N ──moved to──▶ headless output YT-STREAM
+    │                          ├─ wf-recorder -o YT-STREAM → RTMP/RTMPS
+    │                          └─ wl-mirror → physical monitor
+    ▼
+private workspaces on physical outputs
 ```
 
-The core invariant is output selection:
+## Capture contract
 
-- visual capture is safe only when `wf-recorder` records `-o YT-STREAM`;
-- where the `wf-recorder` process was launched from does not matter;
-- normal keybinds should call `workspace-stream workspace ...` so that leaving
-  the stream workspace does not accidentally switch the virtual output.
+- Visual isolation comes from `wf-recorder -o YT-STREAM`; process location has
+  no bearing on capture.
+- Safe workspace bindings call `workspace-stream workspace SELECTOR`, keeping
+  the designated workspace assigned to the headless output.
+- `enter` directs input to the stream workspace; `leave` returns it to the
+  remembered physical monitor.
 
-The implementation stores runtime state in:
+## Video contract
 
-```text
-$XDG_RUNTIME_DIR/yt-stream-workspace/state
-```
-
-That state tracks the stream workspace, original physical monitor, preview
-workspace, Pulse/PipeWire modules, mirror process, live process, and selected
-VAAPI device.
-
-## Video
-
-Video is captured with:
+The recorder uses H.264 VAAPI on a render node proven by a tiny FFmpeg encode:
 
 ```text
-wf-recorder -o YT-STREAM -c h264_vaapi -d /dev/dri/renderD...
+wf-recorder -o YT-STREAM -c h264_vaapi -d /dev/dri/renderD…
 ```
 
-The script auto-detects a VAAPI render node by trying a tiny FFmpeg H.264 encode.
-On Intel iGPU laptops this usually selects `/dev/dri/renderD128`.
+Resolution, rate, scale, bitrate, GOP, and device are configuration, but output
+selection is invariant.
 
-## Audio
+## Audio contract
 
-The script creates:
+The prepared graph contains:
 
-- `yt_stream_mix`: a null sink whose monitor is recorded by `wf-recorder`;
-- `yt_stream_output`: a combined sink that sends desktop audio both to the real
-  speakers/headphones and to the stream mix;
-- a loopback from the default microphone into the stream mix.
+- `yt_stream_mix`, a null sink whose monitor `wf-recorder` captures;
+- `yt_stream_output`, a combined sink feeding both the real output and mix;
+- a loopback from the default microphone to the mix.
 
-That gives a convenient “desktop + mic” stream, but it is global audio. Visual
-isolation does not imply audio isolation.
+This yields desktop plus microphone with local monitoring. It is deliberately
+global: visual isolation does not imply private audio.
 
-## Cleanup
+## State and cleanup contract
 
-`workspace-stream stop` stops live delivery, kills the mirror/background helper,
-unloads the temporary audio modules, moves the workspace back to the original
-monitor, removes the headless output, and removes runtime state.
+Mode-700 state lives at `$XDG_RUNTIME_DIR/yt-stream-workspace/state`. It records
+the stream workspace, original monitor, preview workspace, original audio
+devices, created PipeWire/Pulse modules, helper PIDs, live PID, and VAAPI node.
+
+`workspace-stream stop` uses that ownership record to stop delivery and helper
+processes, unload temporary audio modules, restore the original sink and
+workspace, remove the headless output, and delete runtime state. Install-time
+ownership is separate: a marker records whether this project appended the
+Hyprland source line, allowing uninstall to remove its own edit but preserve a
+pre-existing user line.

@@ -101,8 +101,7 @@ workspace_on_output() {
 wait_until() {
     local description="$1"
     shift
-    local attempt
-    for attempt in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         if "$@"; then
             return 0
         fi
@@ -317,8 +316,7 @@ start_session() {
     chmod 700 "$STATE_DIR"
     write_state
 
-    local completed=0
-    trap 'if (( ! completed )); then stop_session_internal; fi' EXIT
+    trap 'stop_session_internal' EXIT
 
     hyprctl output create headless "$OUTPUT" >/dev/null
     wait_until "headless output" wait_for_output
@@ -358,7 +356,6 @@ start_session() {
         "$VIEWER_WORKSPACE,pid:$MIRROR_PID" >/dev/null
     hyprctl dispatch focuswindow "pid:$MIRROR_PID" >/dev/null
 
-    completed=1
     trap - EXIT
     note "workspace $WORKSPACE is isolated on $OUTPUT"
     note "the fullscreen mirror is on workspace $VIEWER_WORKSPACE"
@@ -370,8 +367,7 @@ start_session() {
 stop_live_internal() {
     if pid_is_alive "${LIVE_PID:-}"; then
         kill -INT "$LIVE_PID" 2>/dev/null || true
-        local attempt
-        for attempt in $(seq 1 50); do
+        for _ in $(seq 1 50); do
             pid_is_alive "$LIVE_PID" || break
             sleep 0.1
         done
@@ -553,11 +549,12 @@ run_local_rtmp_test() {
 
     local seconds="${1:-5}"
     [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || die "test duration must be whole seconds"
-    local received="/tmp/yt-stream-workspace-test-$(date +%Y%m%d-%H%M%S).flv"
+    local received
+    received="/tmp/yt-stream-workspace-test-$(date +%Y%m%d-%H%M%S).flv"
     local url="rtmp://127.0.0.1:$TEST_RTMP_PORT/live/test"
     local receiver_log="$STATE_DIR/rtmp-receiver.log"
     local sender_log="$STATE_DIR/rtmp-sender.log"
-    local receiver_pid tone_pid attempt status
+    local receiver_pid tone_pid status
 
     port_is_listening "$TEST_RTMP_PORT" &&
         die "TCP port $TEST_RTMP_PORT is already in use"
@@ -586,7 +583,7 @@ run_local_rtmp_test() {
     }
     wait "$tone_pid" 2>/dev/null || true
 
-    for attempt in $(seq 1 50); do
+    for _ in $(seq 1 50); do
         pid_is_alive "$receiver_pid" || break
         sleep 0.1
     done
@@ -786,7 +783,10 @@ run_self_test() {
     note "mirrored display and direct keyboard control passed"
     "$SELF" leave
     local expected_monitor
-    expected_monitor="$(source "$STATE_FILE"; printf '%s' "$ORIGINAL_MONITOR")"
+    # The state file is mode 600 in this user's mode 700 runtime directory.
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    expected_monitor="$ORIGINAL_MONITOR"
     [[ "$(
         hyprctl -j monitors | jq -r '.[] | select(.focused) | .name'
     )" == "$expected_monitor" ]] || die "leave did not restore physical input"
