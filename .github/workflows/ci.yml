@@ -12,4 +12,6 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Static checks
-        run: ./tests/static.sh
+        run: make test
+      - name: Isolated install and uninstall
+        run: make smoke

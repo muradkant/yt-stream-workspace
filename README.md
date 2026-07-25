@@ -46,7 +46,19 @@ Installation writes:
 
 With `--hypr-source`, it backs up `hyprland.conf`, appends the source line only
 when absent, and records ownership so `./uninstall.sh` removes only a line this
-installation added.
+installation added. Generated bindings use the actual `XDG_BIN_HOME`, and the
+source line uses the actual `XDG_CONFIG_HOME`; non-default XDG paths are
+supported.
+
+The installer records whether it created or replaced each managed file.
+Replaced executables and snippets are backed up and restored by uninstall. A
+normal uninstall preserves the user configuration; `--purge` removes a created
+config or restores a replaced one:
+
+```sh
+./uninstall.sh          # preserve config
+./uninstall.sh --purge  # remove created config or restore replaced config
+```
 
 ## Stream
 
@@ -58,7 +70,9 @@ workspace-stream start 3
 
 This moves workspace 3 to a `1920x1080@60` headless output at scale 1.5, opens
 a local mirror, selects a working VAAPI H.264 render node, and creates the audio
-mix.
+mix. The selected workspace is explicitly activated on the virtual output;
+known private workspaces are verified back on their original monitors even if
+Hyprland tries to restore them to a same-named output from an earlier session.
 
 Use `Super+F11` to control the stream workspace and `Super+F12` to return to the
 physical monitor, or run `workspace-stream enter` and `workspace-stream leave`.
@@ -92,6 +106,34 @@ workspace-stream stop       # restores workspace, output, audio, and processes
 workspace: virtual output, test terminal, keyboard handoff, return to the
 physical monitor, RTMP, video, audio, and cleanup.
 
+## Preview performance
+
+The preview defaults to `wl-mirror`'s `auto` backend. It tries the GPU DMA-BUF
+paths before shared memory; current Hyprland and wl-mirror releases normally
+select `extcopy-dmabuf`. To reject a slower fallback instead of accepting it:
+
+```sh
+YTWS_MIRROR_BACKEND=extcopy-dmabuf
+```
+
+The recorder is also kept on the GPU: wf-recorder captures `YT-STREAM` through
+DMA-BUF and H.264 encoding uses a tested VAAPI render node. `--no-damage` keeps
+moving output paced at the configured 60 fps rather than recording only damage
+events.
+
+There is still an unavoidable distinction from a normal workspace. A normal
+workspace is presented once; this design renders the headless output and then
+presents a copied GPU buffer in a physical-output window. That can add a frame
+of preview latency even when no frames are dropped. Hyprland's compositor-native
+monitor mirroring is deliberately not used: it removes the physical output from
+the logical layout and migrates its private workspaces onto the captured output,
+which breaks the isolation contract.
+
+`workspace-stream test` verifies encoded frame rate and media shape. It cannot
+measure human-perceived input-to-preview latency. If preview motion is uneven,
+first run `workspace-stream doctor`, require `extcopy-dmabuf`, and inspect the
+persistent logs before changing resolution or frame rate.
+
 ## Configure
 
 Edit `~/.config/yt-stream-workspace/config`:
@@ -102,6 +144,7 @@ YTWS_WIDTH=1920
 YTWS_HEIGHT=1080
 YTWS_FPS=60
 YTWS_SCALE=1.5
+YTWS_MIRROR_BACKEND=auto
 YTWS_VIDEO_BITRATE=12M
 YTWS_VIDEO_GOP=120
 ```
@@ -128,6 +171,17 @@ If the local RTMP port is occupied, change `YTWS_TEST_RTMP_PORT` (default
 19350). If encoding fails, inspect `/dev/dri/renderD*` and set the tested node as
 `YTWS_VAAPI_DEVICE`.
 
+Logs survive session cleanup:
+
+```sh
+workspace-stream logs
+```
+
+They are stored under
+`${XDG_STATE_HOME:-~/.local/state}/yt-stream-workspace`. Runtime ownership state
+remains separate under `XDG_RUNTIME_DIR` and is removed after successful
+cleanup.
+
 The recorder's safety-critical shape is always:
 
 ```sh
@@ -141,7 +195,7 @@ Never substitute process location for `-o` output selection.
 Repository checks are reproducible without modifying the real home directory:
 
 ```sh
-make test   # shell syntax and ShellCheck when installed
+make test   # syntax, ShellCheck, CLI/config behavior
 make smoke  # isolated install, command load, and owned-config uninstall
 ```
 

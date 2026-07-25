@@ -22,11 +22,13 @@ TEST_RTMP_PORT="${YTWS_TEST_RTMP_PORT:-19350}"
 YOUTUBE_RTMPS_URL="${YTWS_YOUTUBE_RTMPS_URL:-rtmps://a.rtmps.youtube.com/live2}"
 WALLPAPER="${YTWS_WALLPAPER:-$HOME/Pictures/background.jpg}"
 CONFIGURED_VAAPI_DEVICE="${YTWS_VAAPI_DEVICE:-}"
+MIRROR_BACKEND="${YTWS_MIRROR_BACKEND:-auto}"
 
 MIX_SINK="${YTWS_MIX_SINK:-yt_stream_mix}"
 OUTPUT_SINK="${YTWS_OUTPUT_SINK:-yt_stream_output}"
 STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/yt-stream-workspace"
 STATE_FILE="$STATE_DIR/state"
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yt-stream-workspace"
 SELF="$(readlink -f "$0")"
 
 die() {
@@ -49,6 +51,7 @@ Usage:
   workspace-stream live                Stream the isolated output to YouTube
   workspace-stream stop-live           Stop YouTube delivery, keep the workspace
   workspace-stream status              Show component status
+  workspace-stream logs                Show the persistent diagnostic log location
   workspace-stream doctor              Check local prerequisites and config
   workspace-stream stop                Restore desktop/audio state
   workspace-stream self-test           Run an automated temporary-workspace integration test
@@ -73,11 +76,42 @@ validate_config() {
     [[ "$FPS" =~ ^[1-9][0-9]*$ ]] || die "YTWS_FPS must be a positive integer"
     [[ "$TEST_RTMP_PORT" =~ ^[1-9][0-9]*$ ]] || die "YTWS_TEST_RTMP_PORT must be a positive integer"
     [[ "$VIDEO_GOP" =~ ^[1-9][0-9]*$ ]] || die "YTWS_VIDEO_GOP must be a positive integer"
+    (( WIDTH % 2 == 0 )) || die "YTWS_WIDTH must be even for H.264"
+    (( HEIGHT % 2 == 0 )) || die "YTWS_HEIGHT must be even for H.264"
+    (( FPS <= 60 )) || die "YTWS_FPS must not exceed YouTube's 60 fps limit"
+    (( TEST_RTMP_PORT <= 65535 )) || die "YTWS_TEST_RTMP_PORT must be at most 65535"
+    (( VIDEO_GOP <= FPS * 4 )) ||
+        die "YTWS_VIDEO_GOP must not exceed four seconds ($((FPS * 4)) frames)"
+    [[ "$SCALE" =~ ^([1-9][0-9]*(\.[0-9]+)?|0+\.[0-9]*[1-9][0-9]*)$ ]] ||
+        die "YTWS_SCALE must be a positive number"
+    [[ "$OUTPUT" =~ ^[A-Za-z0-9._-]+$ ]] ||
+        die "YTWS_OUTPUT may contain only letters, numbers, dot, underscore, and hyphen"
+    [[ "$MIX_SINK" =~ ^[A-Za-z0-9._-]+$ ]] ||
+        die "YTWS_MIX_SINK may contain only letters, numbers, dot, underscore, and hyphen"
+    [[ "$OUTPUT_SINK" =~ ^[A-Za-z0-9._-]+$ ]] ||
+        die "YTWS_OUTPUT_SINK may contain only letters, numbers, dot, underscore, and hyphen"
+    case "$MIRROR_BACKEND" in
+    auto|extcopy-dmabuf|extcopy-shm|screencopy-dmabuf|screencopy-shm|export-dmabuf)
+        ;;
+    *)
+        die "YTWS_MIRROR_BACKEND is not a supported wl-mirror backend"
+        ;;
+    esac
 }
 
 pid_is_alive() {
     local pid="${1:-}"
     [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+pid_is_command() {
+    local pid="${1:-}"
+    local expected="${2:-}"
+    local executable
+
+    pid_is_alive "$pid" || return 1
+    executable="$(readlink -f "/proc/$pid/exe" 2>/dev/null)" || return 1
+    [[ "${executable##*/}" == "$expected" ]]
 }
 
 output_exists() {
@@ -96,6 +130,45 @@ workspace_on_output() {
     local output="$2"
     hyprctl -j workspaces | jq -e --argjson workspace "$workspace" --arg output "$output" \
         'any(.[]; .id == $workspace and .monitor == $output)' >/dev/null
+}
+
+workspace_restored_or_gone() {
+    local workspace="$1"
+    local output="$2"
+    ! workspace_exists "$workspace" || workspace_on_output "$workspace" "$output"
+}
+
+workspace_is_active_on_output() {
+    local workspace="$1"
+    local output="$2"
+    hyprctl -j monitors | jq -e \
+        --argjson workspace "$workspace" \
+        --arg output "$output" \
+        'any(.[];
+            .name == $output and .activeWorkspace.id == $workspace
+        )' >/dev/null
+}
+
+monitor_exists() {
+    local monitor="$1"
+    hyprctl -j monitors | jq -e --arg monitor "$monitor" \
+        'any(.[]; .name == $monitor)' >/dev/null
+}
+
+output_matches_config() {
+    hyprctl -j monitors | jq -e \
+        --arg output "$OUTPUT" \
+        --argjson width "$WIDTH" \
+        --argjson height "$HEIGHT" \
+        --argjson fps "$FPS" \
+        --argjson scale "$SCALE" \
+        'any(.[];
+            .name == $output and
+            .width == $width and
+            .height == $height and
+            ((.refreshRate - $fps) | fabs) < 0.1 and
+            ((.scale - $scale) | fabs) < 0.001
+        )' >/dev/null
 }
 
 wait_until() {
@@ -132,8 +205,27 @@ write_state() {
     chmod 700 "$STATE_DIR"
     umask 077
     {
+        # Snapshot session-defining config so later edits cannot strand resources.
+        printf 'OUTPUT=%q\n' "$OUTPUT"
+        printf 'WIDTH=%q\n' "$WIDTH"
+        printf 'HEIGHT=%q\n' "$HEIGHT"
+        printf 'FPS=%q\n' "$FPS"
+        printf 'SCALE=%q\n' "$SCALE"
+        printf 'VIDEO_BITRATE=%q\n' "$VIDEO_BITRATE"
+        printf 'VIDEO_MAXRATE=%q\n' "$VIDEO_MAXRATE"
+        printf 'VIDEO_BUFSIZE=%q\n' "$VIDEO_BUFSIZE"
+        printf 'VIDEO_GOP=%q\n' "$VIDEO_GOP"
+        printf 'AUDIO_BITRATE=%q\n' "$AUDIO_BITRATE"
+        printf 'TEST_RTMP_PORT=%q\n' "$TEST_RTMP_PORT"
+        printf 'YOUTUBE_RTMPS_URL=%q\n' "$YOUTUBE_RTMPS_URL"
+        printf 'MIX_SINK=%q\n' "$MIX_SINK"
+        printf 'OUTPUT_SINK=%q\n' "$OUTPUT_SINK"
+        printf 'MIRROR_BACKEND=%q\n' "$MIRROR_BACKEND"
+        printf 'LOG_DIR=%q\n' "$LOG_DIR"
         printf 'WORKSPACE=%q\n' "${WORKSPACE:-}"
         printf 'ORIGINAL_MONITOR=%q\n' "${ORIGINAL_MONITOR:-}"
+        printf 'ORIGINAL_WORKSPACE=%q\n' "${ORIGINAL_WORKSPACE:-}"
+        printf 'WORKSPACE_MONITORS=%q\n' "${WORKSPACE_MONITORS:-}"
         printf 'VIEWER_WORKSPACE=%q\n' "${VIEWER_WORKSPACE:-}"
         printf 'RETURN_WORKSPACE=%q\n' "${RETURN_WORKSPACE:-}"
         printf 'ORIGINAL_SINK=%q\n' "${ORIGINAL_SINK:-}"
@@ -147,6 +239,38 @@ write_state() {
         printf 'LIVE_PID=%q\n' "${LIVE_PID:-}"
         printf 'VAAPI_DEVICE=%q\n' "${VAAPI_DEVICE:-}"
     } >"$STATE_FILE"
+}
+
+restore_private_workspaces() {
+    local known_only="${1:-0}"
+    local workspace original_monitor restore_monitor
+
+    while IFS= read -r workspace; do
+        [[ -n "$workspace" && "$workspace" != "$WORKSPACE" ]] || continue
+        original_monitor="$(
+            printf '%s\n' "${WORKSPACE_MONITORS:-}" |
+                awk -F '\t' -v workspace="$workspace" \
+                    '$1 == workspace {print $2; exit}'
+        )"
+        if [[ -z "$original_monitor" && "$known_only" == 1 ]]; then
+            continue
+        fi
+
+        restore_monitor="$original_monitor"
+        if [[ -z "$restore_monitor" || "$restore_monitor" == "$OUTPUT" ]] ||
+           ! monitor_exists "$restore_monitor"; then
+            restore_monitor="$(first_physical_monitor)"
+        fi
+        [[ -n "$restore_monitor" ]] || continue
+
+        hyprctl dispatch moveworkspacetomonitor \
+            "$workspace $restore_monitor" >/dev/null
+        wait_until "private workspace $workspace restoration" \
+            workspace_restored_or_gone "$workspace" "$restore_monitor"
+    done < <(
+        hyprctl -j workspaces | jq -r --arg output "$OUTPUT" \
+            '.[] | select(.monitor == $output) | .id'
+    )
 }
 
 wait_for_output() {
@@ -286,6 +410,16 @@ start_session() {
     [[ ! -e "$STATE_FILE" ]] || die "a stream session is already prepared"
     output_exists && die "Hyprland output '$OUTPUT' already exists"
 
+    detect_vaapi_device
+    local monitor_workspaces
+    monitor_workspaces="$(
+        hyprctl -j monitors | jq -r \
+            '.[] | [.name, .activeWorkspace.id] | @tsv'
+    )"
+    WORKSPACE_MONITORS="$(
+        hyprctl -j workspaces | jq -r '.[] | [.id, .monitor] | @tsv'
+    )"
+
     WORKSPACE="${1:-$(hyprctl -j activeworkspace | jq -r '.id')}"
     [[ "$WORKSPACE" =~ ^[1-9][0-9]*$ ]] ||
         die "workspace must be a positive numeric Hyprland workspace"
@@ -299,6 +433,13 @@ start_session() {
             '.[] | select(.id == $workspace) | .monitor'
     )"
     [[ -n "$ORIGINAL_MONITOR" ]] || die "could not determine the workspace's monitor"
+    ORIGINAL_WORKSPACE="$(
+        printf '%s\n' "$monitor_workspaces" |
+            awk -F '\t' -v monitor="$ORIGINAL_MONITOR" \
+                '$1 == monitor {print $2; exit}'
+    )"
+    [[ "$ORIGINAL_WORKSPACE" =~ ^[1-9][0-9]*$ ]] ||
+        die "could not determine the monitor's active workspace"
 
     ORIGINAL_SINK=""
     ORIGINAL_SOURCE=""
@@ -309,11 +450,11 @@ start_session() {
     MIRROR_PID=""
     WALLPAPER_PID=""
     LIVE_PID=""
-    VAAPI_DEVICE=""
-    detect_vaapi_device
 
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
+    mkdir -p "$LOG_DIR"
+    chmod 700 "$LOG_DIR"
     write_state
 
     trap 'stop_session_internal' EXIT
@@ -322,11 +463,19 @@ start_session() {
     wait_until "headless output" wait_for_output
     hyprctl keyword monitor \
         "$OUTPUT,${WIDTH}x${HEIGHT}@${FPS},auto-right,$SCALE" >/dev/null
-    sleep 0.2
+    wait_until "configured output mode" output_matches_config
+    # Hyprland remembers the last monitor of a workspace and may automatically
+    # return it when a same-named output is recreated. Keep that reconciliation
+    # from pulling unrelated workspaces across the capture boundary.
+    restore_private_workspaces 1
 
     hyprctl dispatch moveworkspacetomonitor \
         "$WORKSPACE $OUTPUT" >/dev/null
     wait_until "workspace move" workspace_on_output "$WORKSPACE" "$OUTPUT"
+    hyprctl dispatch focusmonitor "$OUTPUT" >/dev/null
+    hyprctl dispatch workspace "$WORKSPACE" >/dev/null
+    wait_until "stream workspace activation" \
+        workspace_is_active_on_output "$WORKSPACE" "$OUTPUT"
 
     VIEWER_WORKSPACE="$(
         hyprctl -j monitors | jq -r --arg monitor "$ORIGINAL_MONITOR" \
@@ -334,20 +483,25 @@ start_session() {
     )"
     [[ "$VIEWER_WORKSPACE" =~ ^[1-9][0-9]*$ ]] ||
         die "could not find a physical workspace for the output mirror"
-    RETURN_WORKSPACE="$VIEWER_WORKSPACE"
+    if [[ "$ORIGINAL_WORKSPACE" == "$WORKSPACE" ]]; then
+        RETURN_WORKSPACE="$VIEWER_WORKSPACE"
+    else
+        RETURN_WORKSPACE="$ORIGINAL_WORKSPACE"
+    fi
 
     if command -v swaybg >/dev/null 2>&1 && [[ -f "$WALLPAPER" ]]; then
         swaybg -o "$OUTPUT" -i "$WALLPAPER" \
-            >"$STATE_DIR/swaybg.log" 2>&1 &
+            >"$LOG_DIR/swaybg.log" 2>&1 &
         WALLPAPER_PID=$!
     fi
 
     audio_start
     write_state
 
-    wl-mirror --fullscreen-output "$ORIGINAL_MONITOR" --show-cursor \
+    wl-mirror --backend "$MIRROR_BACKEND" \
+        --fullscreen-output "$ORIGINAL_MONITOR" --show-cursor \
         --scaling fit --title YT-Stream-Preview "$OUTPUT" \
-        >"$STATE_DIR/wl-mirror.log" 2>&1 &
+        >"$LOG_DIR/wl-mirror.log" 2>&1 &
     MIRROR_PID=$!
     write_state
     wait_until "wl-mirror window" client_pid_exists "$MIRROR_PID"
@@ -365,7 +519,7 @@ start_session() {
 }
 
 stop_live_internal() {
-    if pid_is_alive "${LIVE_PID:-}"; then
+    if pid_is_command "${LIVE_PID:-}" wf-recorder; then
         kill -INT "$LIVE_PID" 2>/dev/null || true
         for _ in $(seq 1 50); do
             pid_is_alive "$LIVE_PID" || break
@@ -377,19 +531,24 @@ stop_live_internal() {
 }
 
 stop_session_internal() {
+    local restore_monitor="${ORIGINAL_MONITOR:-}"
+
     stop_live_internal
 
-    if pid_is_alive "${MIRROR_PID:-}"; then
+    if pid_is_command "${MIRROR_PID:-}" wl-mirror; then
         kill "$MIRROR_PID" 2>/dev/null || true
     fi
-    if pid_is_alive "${WALLPAPER_PID:-}"; then
+    if pid_is_command "${WALLPAPER_PID:-}" swaybg; then
         kill "$WALLPAPER_PID" 2>/dev/null || true
     fi
 
     audio_stop
 
+    if output_exists; then
+        restore_private_workspaces 0
+    fi
+
     if [[ -n "${WORKSPACE:-}" ]] && workspace_exists "$WORKSPACE"; then
-        local restore_monitor="${ORIGINAL_MONITOR:-}"
         if [[ -z "$restore_monitor" ]] ||
            ! hyprctl -j monitors | jq -e --arg monitor "$restore_monitor" \
                 'any(.[]; .name == $monitor)' >/dev/null; then
@@ -402,6 +561,20 @@ stop_session_internal() {
     fi
     if output_exists; then
         hyprctl output remove "$OUTPUT" >/dev/null 2>&1 || true
+        for _ in $(seq 1 100); do
+            output_exists || break
+            sleep 0.05
+        done
+        if output_exists; then
+            note "could not remove stream output '$OUTPUT'; preserving state for recovery"
+            return 1
+        fi
+    fi
+
+    if [[ -n "$restore_monitor" &&
+          "${ORIGINAL_WORKSPACE:-}" =~ ^[1-9][0-9]*$ ]]; then
+        hyprctl dispatch focusmonitor "$restore_monitor" >/dev/null 2>&1 || true
+        hyprctl dispatch workspace "$ORIGINAL_WORKSPACE" >/dev/null 2>&1 || true
     fi
 
     rm -rf "$STATE_DIR"
@@ -453,7 +626,7 @@ enter_stream() {
 
     hyprctl dispatch focusmonitor "$ORIGINAL_MONITOR" >/dev/null
     hyprctl dispatch workspace "$VIEWER_WORKSPACE" >/dev/null
-    if pid_is_alive "$MIRROR_PID"; then
+    if pid_is_command "$MIRROR_PID" wl-mirror; then
         hyprctl dispatch focuswindow "pid:$MIRROR_PID" >/dev/null
     fi
     focus_monitor_center "$OUTPUT"
@@ -517,8 +690,10 @@ test_file() {
     video_ok="$(
         printf '%s\n' "$probe" | jq -r --argjson width "$WIDTH" \
             --argjson height "$HEIGHT" \
+            --arg rate "$FPS/1" \
             '[.streams[] | select(.codec_type == "video" and
-              .codec_name == "h264" and .width == $width and .height == $height)]
+              .codec_name == "h264" and .width == $width and .height == $height and
+              .r_frame_rate == $rate)]
              | length'
     )"
     audio_ok="$(
@@ -544,7 +719,7 @@ run_local_rtmp_test() {
     validate_config
     load_state
     require_commands ffmpeg ffprobe timeout
-    pid_is_alive "$MIRROR_PID" || die "wl-mirror is not running"
+    pid_is_command "$MIRROR_PID" wl-mirror || die "wl-mirror is not running"
     output_exists || die "stream output is missing"
 
     local seconds="${1:-5}"
@@ -552,8 +727,10 @@ run_local_rtmp_test() {
     local received
     received="/tmp/yt-stream-workspace-test-$(date +%Y%m%d-%H%M%S).flv"
     local url="rtmp://127.0.0.1:$TEST_RTMP_PORT/live/test"
-    local receiver_log="$STATE_DIR/rtmp-receiver.log"
-    local sender_log="$STATE_DIR/rtmp-sender.log"
+    mkdir -p "$LOG_DIR"
+    chmod 700 "$LOG_DIR"
+    local receiver_log="$LOG_DIR/rtmp-receiver.log"
+    local sender_log="$LOG_DIR/rtmp-sender.log"
     local receiver_pid tone_pid status
 
     port_is_listening "$TEST_RTMP_PORT" &&
@@ -600,7 +777,8 @@ run_local_rtmp_test() {
 start_live() {
     validate_config
     load_state
-    pid_is_alive "${LIVE_PID:-}" && die "YouTube delivery is already running"
+    pid_is_command "${LIVE_PID:-}" wf-recorder &&
+        die "YouTube delivery is already running"
     [[ -t 0 ]] || die "live mode needs an interactive terminal for the stream key"
 
     local key url
@@ -616,7 +794,7 @@ start_live() {
     write_state
 
     sleep 2
-    if ! pid_is_alive "$LIVE_PID"; then
+    if ! pid_is_command "$LIVE_PID" wf-recorder; then
         LIVE_PID=""
         write_state
         die "wf-recorder exited before establishing the stream"
@@ -642,12 +820,28 @@ show_status() {
     printf 'resolution:     %sx%s@%s scale %s\n' "$WIDTH" "$HEIGHT" "$FPS" "$SCALE"
     printf 'VAAPI device:   %s\n' "${VAAPI_DEVICE:-unknown}"
     printf 'output status:  %s\n' "$(output_exists && echo up || echo down)"
-    printf 'wl-mirror:      %s\n' "$(pid_is_alive "$MIRROR_PID" && echo up || echo down)"
+    printf 'wl-mirror:      %s\n' "$(
+        pid_is_command "$MIRROR_PID" wl-mirror && echo up || echo down
+    )"
+    printf 'mirror backend: %s\n' "$MIRROR_BACKEND"
     printf 'mixed audio:    %s\n' "$(
         pactl list short sinks | awk -v name="$MIX_SINK" \
             '$2 == name {found=1} END {print found ? "up" : "down"}'
     )"
-    printf 'YouTube:        %s\n' "$(pid_is_alive "${LIVE_PID:-}" && echo live || echo stopped)"
+    printf 'YouTube:        %s\n' "$(
+        pid_is_command "${LIVE_PID:-}" wf-recorder && echo live || echo stopped
+    )"
+    printf 'logs:           %s\n' "$LOG_DIR"
+}
+
+show_logs() {
+    printf '%s\n' "$LOG_DIR"
+    if [[ -d "$LOG_DIR" ]]; then
+        find "$LOG_DIR" -maxdepth 1 -type f -printf '%TY-%Tm-%Td %TH:%TM  %f\n' |
+            sort -r
+    else
+        note "no diagnostic logs have been written"
+    fi
 }
 
 doctor_check_command() {
@@ -677,6 +871,8 @@ run_doctor() {
     printf 'yt-stream-workspace doctor\n'
     printf 'config: %s\n' "$CONFIG_FILE"
     printf 'target output: %s %sx%s@%s scale %s\n' "$OUTPUT" "$WIDTH" "$HEIGHT" "$FPS" "$SCALE"
+    printf 'mirror backend: %s\n' "$MIRROR_BACKEND"
+    printf 'logs: %s\n' "$LOG_DIR"
 
     local command
     for command in hyprctl jq pactl wl-mirror wf-recorder ffmpeg ffprobe ss timeout; do
@@ -775,6 +971,20 @@ run_self_test() {
     wait_until "temporary workspace" workspace_exists "$test_workspace"
 
     "$SELF" start "$test_workspace"
+    # The state file is private shell data written by this command.
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    workspace_is_active_on_output "$test_workspace" "$OUTPUT" ||
+        die "the selected workspace is not active on the stream output"
+    local known_workspace
+    while IFS=$'\t' read -r known_workspace _; do
+        [[ -n "$known_workspace" && "$known_workspace" != "$test_workspace" ]] ||
+            continue
+        if workspace_on_output "$known_workspace" "$OUTPUT"; then
+            die "private workspace $known_workspace crossed onto the stream output"
+        fi
+    done <<<"$WORKSPACE_MONITORS"
+    note "stream activation and private-workspace placement passed"
     sleep 0.5
     "$SELF" enter
     wtype -s 200 v
@@ -783,9 +993,6 @@ run_self_test() {
     note "mirrored display and direct keyboard control passed"
     "$SELF" leave
     local expected_monitor
-    # The state file is mode 600 in this user's mode 700 runtime directory.
-    # shellcheck disable=SC1090
-    source "$STATE_FILE"
     expected_monitor="$ORIGINAL_MONITOR"
     [[ "$(
         hyprctl -j monitors | jq -r '.[] | select(.focused) | .name'
@@ -822,6 +1029,9 @@ stop-live)
     ;;
 status)
     show_status
+    ;;
+logs)
+    show_logs
     ;;
 doctor)
     run_doctor
