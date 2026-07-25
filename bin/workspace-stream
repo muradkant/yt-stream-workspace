@@ -374,12 +374,15 @@ audio_stop() {
         fi
     fi
 
-    [[ -n "${LOOPBACK_MODULE:-}" ]] &&
+    if [[ -n "${LOOPBACK_MODULE:-}" ]]; then
         pactl unload-module "$LOOPBACK_MODULE" 2>/dev/null || true
-    [[ -n "${COMBINE_MODULE:-}" ]] &&
+    fi
+    if [[ -n "${COMBINE_MODULE:-}" ]]; then
         pactl unload-module "$COMBINE_MODULE" 2>/dev/null || true
-    [[ -n "${NULL_MODULE:-}" ]] &&
+    fi
+    if [[ -n "${NULL_MODULE:-}" ]]; then
         pactl unload-module "$NULL_MODULE" 2>/dev/null || true
+    fi
 }
 
 wf_recorder_args() {
@@ -525,7 +528,9 @@ stop_live_internal() {
             pid_is_alive "$LIVE_PID" || break
             sleep 0.1
         done
-        pid_is_alive "$LIVE_PID" && kill "$LIVE_PID" 2>/dev/null || true
+        if pid_is_alive "$LIVE_PID"; then
+            kill "$LIVE_PID" 2>/dev/null || true
+        fi
     fi
     LIVE_PID=""
 }
@@ -954,7 +959,9 @@ run_self_test() {
         if [[ -r "$STATE_FILE" ]]; then
             "$SELF" stop >/dev/null 2>&1 || true
         fi
-        pid_is_alive "${test_pid:-}" && kill "$test_pid" 2>/dev/null || true
+        if pid_is_alive "${test_pid:-}"; then
+            kill "$test_pid" 2>/dev/null || true
+        fi
         [[ -n "${marker:-}" ]] && rm -f "$marker"
         if [[ -n "${original_workspace:-}" ]]; then
             hyprctl dispatch workspace "$original_workspace" >/dev/null 2>&1 || true
