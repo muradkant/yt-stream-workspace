@@ -40,6 +40,38 @@ note() {
     printf 'workspace-stream: %s\n' "$*"
 }
 
+# Hyprland 0.55+ dispatches through Lua. `hyprctl dispatch <dispatcher> <args>`
+# is no longer valid on a Lua config root, so these helpers emit the Lua
+# expression that Hyprland evaluates as hl.dispatch(...).
+dsp_focus_workspace() {
+    hyprctl dispatch "hl.dsp.focus({ workspace = \"$1\" })"
+}
+
+dsp_focus_monitor() {
+    hyprctl dispatch "hl.dsp.focus({ monitor = \"$1\" })"
+}
+
+dsp_focus_window() {
+    hyprctl dispatch "hl.dsp.focus({ window = \"$1\" })"
+}
+
+dsp_workspace_to_monitor() {
+    hyprctl dispatch "hl.dsp.workspace.move({ workspace = \"$1\", monitor = \"$2\" })"
+}
+
+dsp_window_to_workspace() {
+    local workspace="$1" window_selector="${2:-}"
+    if [[ -n "$window_selector" ]]; then
+        hyprctl dispatch "hl.dsp.window.move({ workspace = \"$workspace\", window = \"$window_selector\", follow = false })"
+    else
+        hyprctl dispatch "hl.dsp.window.move({ workspace = \"$workspace\", follow = false })"
+    fi
+}
+
+dsp_move_cursor() {
+    hyprctl dispatch "hl.dsp.cursor.move({ x = $1, y = $2 })"
+}
+
 usage() {
     cat <<EOF
 Usage:
@@ -263,8 +295,7 @@ restore_private_workspaces() {
         fi
         [[ -n "$restore_monitor" ]] || continue
 
-        hyprctl dispatch moveworkspacetomonitor \
-            "$workspace $restore_monitor" >/dev/null
+        dsp_workspace_to_monitor "$workspace" "$restore_monitor" >/dev/null
         wait_until "private workspace $workspace restoration" \
             workspace_restored_or_gone "$workspace" "$restore_monitor"
     done < <(
@@ -427,7 +458,7 @@ start_session() {
     [[ "$WORKSPACE" =~ ^[1-9][0-9]*$ ]] ||
         die "workspace must be a positive numeric Hyprland workspace"
     if ! workspace_exists "$WORKSPACE"; then
-        hyprctl dispatch workspace "$WORKSPACE" >/dev/null
+        dsp_focus_workspace "$WORKSPACE" >/dev/null
         wait_until "workspace $WORKSPACE creation" workspace_exists "$WORKSPACE"
     fi
 
@@ -472,11 +503,10 @@ start_session() {
     # from pulling unrelated workspaces across the capture boundary.
     restore_private_workspaces 1
 
-    hyprctl dispatch moveworkspacetomonitor \
-        "$WORKSPACE $OUTPUT" >/dev/null
+    dsp_workspace_to_monitor "$WORKSPACE" "$OUTPUT" >/dev/null
     wait_until "workspace move" workspace_on_output "$WORKSPACE" "$OUTPUT"
-    hyprctl dispatch focusmonitor "$OUTPUT" >/dev/null
-    hyprctl dispatch workspace "$WORKSPACE" >/dev/null
+    dsp_focus_monitor "$OUTPUT" >/dev/null
+    dsp_focus_workspace "$WORKSPACE" >/dev/null
     wait_until "stream workspace activation" \
         workspace_is_active_on_output "$WORKSPACE" "$OUTPUT"
 
@@ -509,9 +539,8 @@ start_session() {
     write_state
     wait_until "wl-mirror window" client_pid_exists "$MIRROR_PID"
 
-    hyprctl dispatch movetoworkspacesilent \
-        "$VIEWER_WORKSPACE,pid:$MIRROR_PID" >/dev/null
-    hyprctl dispatch focuswindow "pid:$MIRROR_PID" >/dev/null
+    dsp_window_to_workspace "$VIEWER_WORKSPACE" "pid:$MIRROR_PID" >/dev/null
+    dsp_focus_window "pid:$MIRROR_PID" >/dev/null
 
     trap - EXIT
     note "workspace $WORKSPACE is isolated on $OUTPUT"
@@ -560,8 +589,7 @@ stop_session_internal() {
             restore_monitor="$(first_physical_monitor)"
         fi
         if [[ -n "$restore_monitor" ]]; then
-            hyprctl dispatch moveworkspacetomonitor \
-                "$WORKSPACE $restore_monitor" >/dev/null 2>&1 || true
+            dsp_workspace_to_monitor "$WORKSPACE" "$restore_monitor" >/dev/null 2>&1 || true
         fi
     fi
     if output_exists; then
@@ -578,8 +606,8 @@ stop_session_internal() {
 
     if [[ -n "$restore_monitor" &&
           "${ORIGINAL_WORKSPACE:-}" =~ ^[1-9][0-9]*$ ]]; then
-        hyprctl dispatch focusmonitor "$restore_monitor" >/dev/null 2>&1 || true
-        hyprctl dispatch workspace "$ORIGINAL_WORKSPACE" >/dev/null 2>&1 || true
+        dsp_focus_monitor "$restore_monitor" >/dev/null 2>&1 || true
+        dsp_focus_workspace "$ORIGINAL_WORKSPACE" >/dev/null 2>&1 || true
     fi
 
     rm -rf "$STATE_DIR"
@@ -601,9 +629,8 @@ focus_monitor_center() {
     )"
     [[ -n "$geometry" ]] || die "monitor '$monitor' is unavailable"
     read -r x y width height <<<"$geometry"
-    hyprctl dispatch focusmonitor "$monitor" >/dev/null
-    hyprctl dispatch movecursor \
-        "$((x + width / 2)) $((y + height / 2))" >/dev/null
+    dsp_focus_monitor "$monitor" >/dev/null
+    dsp_move_cursor "$((x + width / 2))" "$((y + height / 2))" >/dev/null
 }
 
 enter_stream() {
@@ -615,8 +642,7 @@ enter_stream() {
             '.[] | select(.id == $workspace) | .monitor'
     )"
     if [[ -n "$assigned_monitor" && "$assigned_monitor" != "$OUTPUT" ]]; then
-        hyprctl dispatch moveworkspacetomonitor \
-            "$WORKSPACE $OUTPUT" >/dev/null
+        dsp_workspace_to_monitor "$WORKSPACE" "$OUTPUT" >/dev/null
     fi
     local current_physical_workspace
     current_physical_workspace="$(
@@ -629,13 +655,13 @@ enter_stream() {
         write_state
     fi
 
-    hyprctl dispatch focusmonitor "$ORIGINAL_MONITOR" >/dev/null
-    hyprctl dispatch workspace "$VIEWER_WORKSPACE" >/dev/null
+    dsp_focus_monitor "$ORIGINAL_MONITOR" >/dev/null
+    dsp_focus_workspace "$VIEWER_WORKSPACE" >/dev/null
     if pid_is_command "$MIRROR_PID" wl-mirror; then
-        hyprctl dispatch focuswindow "pid:$MIRROR_PID" >/dev/null
+        dsp_focus_window "pid:$MIRROR_PID" >/dev/null
     fi
     focus_monitor_center "$OUTPUT"
-    hyprctl dispatch workspace "$WORKSPACE" >/dev/null
+    dsp_focus_workspace "$WORKSPACE" >/dev/null
     local stream_window
     stream_window="$(
         hyprctl -j clients | jq -r --argjson workspace "$WORKSPACE" \
@@ -644,7 +670,7 @@ enter_stream() {
              | .[0].address // empty'
     )"
     if [[ -n "$stream_window" ]]; then
-        hyprctl dispatch focuswindow "address:$stream_window" >/dev/null
+        dsp_focus_window "address:$stream_window" >/dev/null
     fi
     note "input is now controlling workspace $WORKSPACE on $OUTPUT"
 }
@@ -653,7 +679,7 @@ leave_stream() {
     load_state
     focus_monitor_center "$ORIGINAL_MONITOR"
     if [[ "${RETURN_WORKSPACE:-}" =~ ^[1-9][0-9]*$ ]]; then
-        hyprctl dispatch workspace "$RETURN_WORKSPACE" >/dev/null
+        dsp_focus_workspace "$RETURN_WORKSPACE" >/dev/null
     fi
     note "input returned to $ORIGINAL_MONITOR"
 }
@@ -675,10 +701,10 @@ switch_workspace() {
         if [[ "$focused_monitor" == "$OUTPUT" ]]; then
             leave_stream
         else
-            hyprctl dispatch focusmonitor "$ORIGINAL_MONITOR" >/dev/null
+            dsp_focus_monitor "$ORIGINAL_MONITOR" >/dev/null
         fi
     fi
-    hyprctl dispatch workspace "$selector" >/dev/null
+    dsp_focus_workspace "$selector" >/dev/null
 }
 
 test_file() {
@@ -964,7 +990,7 @@ run_self_test() {
         fi
         [[ -n "${marker:-}" ]] && rm -f "$marker"
         if [[ -n "${original_workspace:-}" ]]; then
-            hyprctl dispatch workspace "$original_workspace" >/dev/null 2>&1 || true
+            dsp_focus_workspace "$original_workspace" >/dev/null 2>&1 || true
         fi
     }
     trap cleanup_self_test EXIT
@@ -973,8 +999,7 @@ run_self_test() {
         "$SELF" _self-test-window "$marker" >/dev/null 2>&1 &
     test_pid=$!
     wait_until "test window" client_pid_exists "$test_pid"
-    hyprctl dispatch movetoworkspacesilent \
-        "$test_workspace,pid:$test_pid" >/dev/null
+    dsp_window_to_workspace "$test_workspace" "pid:$test_pid" >/dev/null
     wait_until "temporary workspace" workspace_exists "$test_workspace"
 
     "$SELF" start "$test_workspace"
