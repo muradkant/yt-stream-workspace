@@ -30,7 +30,7 @@ for arg in "$@"; do
         printf 'Usage: ./install.sh [--force] [--deps] [--hypr-source]\n'
         printf '  --force        replace existing project files after backing them up\n'
         printf '  --deps         install Arch/CachyOS runtime dependencies with pacman\n'
-        printf '  --hypr-source  append the source line to ~/.config/hypr/hyprland.conf if missing\n'
+        printf '  --hypr-source  append a require line for yt-stream-workspace to hyprland.lua if missing\n'
         exit 0
         ;;
     *)
@@ -48,10 +48,10 @@ if [[ "$INSTALL_DEPS" == 1 ]]; then
     sudo pacman -S --needed wf-recorder wl-mirror jq ffmpeg pipewire-pulse kitty wtype iproute2
 fi
 
+HYPR_LUA="$HYPR_DIR/hyprland.lua"
 if [[ "$HYPR_SOURCE" == 1 ]]; then
-    HYPR_CONF="$HYPR_DIR/hyprland.conf"
-    if [[ ! -e "$HYPR_CONF" ]]; then
-        printf 'install.sh: cannot use --hypr-source; missing %s\n' "$HYPR_CONF" >&2
+    if [[ ! -e "$HYPR_LUA" ]]; then
+        printf 'install.sh: cannot use --hypr-source; missing %s\n' "$HYPR_LUA" >&2
         exit 1
     fi
 fi
@@ -93,56 +93,54 @@ else
     printf 'Keeping existing config: %s\n' "$CONFIG_DIR/config"
 fi
 
-install_hypr_snippet() {
-    local target="$HYPR_DIR/yt-stream-workspace.conf"
+install_hypr_module() {
+    local target="$HYPR_DIR/yt-stream-workspace.lua"
     local quoted_bin escaped_bin temporary
 
     printf -v quoted_bin '%q' "$BIN_DIR/workspace-stream"
     escaped_bin="${quoted_bin//\\/\\\\}"
     escaped_bin="${escaped_bin//&/\\&}"
     escaped_bin="${escaped_bin//|/\\|}"
-    temporary="$(mktemp "$HYPR_DIR/.yt-stream-workspace.conf.XXXXXX")"
+    temporary="$(mktemp "$HYPR_DIR/.yt-stream-workspace.lua.XXXXXX")"
     sed "s|~/.local/bin/workspace-stream|$escaped_bin|g" \
-        "$ROOT/hyprland/yt-stream-workspace.conf" >"$temporary"
+        "$ROOT/hyprland/yt-stream-workspace.lua" >"$temporary"
     install -m 644 "$temporary" "$target"
     rm -f "$temporary"
 }
 
-if [[ ! -e "$HYPR_DIR/yt-stream-workspace.conf" ]]; then
+if [[ ! -e "$HYPR_DIR/yt-stream-workspace.lua" ]]; then
     mark_created "$SNIPPET_MARKER"
-    install_hypr_snippet
+    install_hypr_module
 elif [[ "$FORCE" == 1 ]]; then
     backup_unowned_file \
-        "$HYPR_DIR/yt-stream-workspace.conf" \
+        "$HYPR_DIR/yt-stream-workspace.lua" \
         "$SNIPPET_MARKER" \
-        "$BACKUP_DIR/yt-stream-workspace.conf"
-    install_hypr_snippet
+        "$BACKUP_DIR/yt-stream-workspace.lua"
+    install_hypr_module
 else
-    printf 'Keeping existing Hyprland snippet: %s\n' "$HYPR_DIR/yt-stream-workspace.conf"
+    printf 'Keeping existing Hyprland module: %s\n' "$HYPR_DIR/yt-stream-workspace.lua"
 fi
 
 if [[ "$HYPR_SOURCE" == 1 ]]; then
-    SOURCE_LINE="source = $HYPR_DIR/yt-stream-workspace.conf"
-    LEGACY_SOURCE_LINE='source = ~/.config/hypr/yt-stream-workspace.conf'
-    if grep -Fqx "$SOURCE_LINE" "$HYPR_CONF" ||
-       grep -Fqx "$LEGACY_SOURCE_LINE" "$HYPR_CONF"; then
-        printf 'Hyprland source line already present in %s\n' "$HYPR_CONF"
+    REQUIRE_LINE='require("yt-stream-workspace")'
+    if grep -Fqx "$REQUIRE_LINE" "$HYPR_LUA"; then
+        printf 'Hyprland require line already present in %s\n' "$HYPR_LUA"
     else
-        BACKUP="$HYPR_CONF.yt-stream-workspace.bak.$(date +%Y%m%d-%H%M%S)"
-        cp "$HYPR_CONF" "$BACKUP"
-        printf '\n# yt-stream-workspace\n%s\n' "$SOURCE_LINE" >>"$HYPR_CONF"
-        printf '%s\n' "$SOURCE_LINE" >"$HYPR_SOURCE_MARKER"
-        printf 'Added Hyprland source line to %s\n' "$HYPR_CONF"
+        BACKUP="$HYPR_LUA.yt-stream-workspace.bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$HYPR_LUA" "$BACKUP"
+        printf '\n# yt-stream-workspace\n%s\n' "$REQUIRE_LINE" >>"$HYPR_LUA"
+        printf '%s\n' "$REQUIRE_LINE" >"$HYPR_SOURCE_MARKER"
+        printf 'Added Hyprland require line to %s\n' "$HYPR_LUA"
         printf 'Backup: %s\n' "$BACKUP"
     fi
 fi
 
 printf 'Installed workspace-stream to %s/workspace-stream\n' "$BIN_DIR"
 printf 'Config: %s/config\n' "$CONFIG_DIR"
-printf 'Hyprland snippet: %s/yt-stream-workspace.conf\n' "$HYPR_DIR"
+printf 'Hyprland module: %s/yt-stream-workspace.lua\n' "$HYPR_DIR"
 printf '\n'
-printf 'Add this line to hyprland.conf if you have not already:\n'
-printf 'source = %s/yt-stream-workspace.conf\n' "$HYPR_DIR"
+printf 'Add this line to hyprland.lua if you have not already:\n'
+printf 'require("yt-stream-workspace")\n'
 printf '\n'
 printf 'Then reload Hyprland and run: workspace-stream self-test\n'
 printf 'For prerequisite diagnostics, run: workspace-stream doctor\n'

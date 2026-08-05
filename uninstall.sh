@@ -4,7 +4,6 @@ set -Eeuo pipefail
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-stream-workspace"
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
-HYPR_CONF="$HYPR_DIR/hyprland.conf"
 HYPR_SOURCE_MARKER="$CONFIG_DIR/hypr-source-added"
 INSTALL_STATE_DIR="$CONFIG_DIR/.install-state"
 BACKUP_DIR="$INSTALL_STATE_DIR/backups"
@@ -32,21 +31,18 @@ esac
 
 printf 'This removes only files installed by yt-stream-workspace.\n'
 
-if [[ -e "$HYPR_SOURCE_MARKER" && -f "$HYPR_CONF" ]]; then
-    owned_source_line="$(sed -n '1p' "$HYPR_SOURCE_MARKER")"
-    if [[ -z "$owned_source_line" ]]; then
-        # Compatibility with the empty marker written by versions before 2026-07.
-        owned_source_line='source = ~/.config/hypr/yt-stream-workspace.conf'
-    fi
-    BACKUP="$HYPR_CONF.yt-stream-workspace-uninstall.bak.$(date +%Y%m%d-%H%M%S)"
-    cp "$HYPR_CONF" "$BACKUP"
-    temporary="$(mktemp "$HYPR_DIR/.hyprland.conf.XXXXXX")"
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == "$owned_source_line" ]] || printf '%s\n' "$line"
-    done <"$HYPR_CONF" >"$temporary"
-    chmod --reference="$HYPR_CONF" "$temporary"
-    mv "$temporary" "$HYPR_CONF"
-    printf 'Removed the installer-owned Hyprland source line. Backup: %s\n' "$BACKUP"
+HYPR_LUA="$HYPR_DIR/hyprland.lua"
+if [[ -e "$HYPR_SOURCE_MARKER" && -f "$HYPR_LUA" ]]; then
+    BACKUP="$HYPR_LUA.yt-stream-workspace-uninstall.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$HYPR_LUA" "$BACKUP"
+    # Remove the require line this installer owns, plus any source line left by
+    # an install made before the Hyprland 0.55 Lua migration.
+    sed -i \
+        -e '/^# yt-stream-workspace$/d' \
+        -e '/^require("yt-stream-workspace")$/d' \
+        -e '/^source = .*yt-stream-workspace.*\.conf$/d' \
+        "$HYPR_LUA"
+    printf 'Removed the installer-owned Hyprland require line. Backup: %s\n' "$BACKUP"
 fi
 
 restore_or_remove() {
@@ -89,8 +85,8 @@ restore_or_remove \
     "$BIN_DIR/workspace-stream" "$BIN_MARKER" "$BACKUP_DIR/workspace-stream" \
     "workspace-stream executable"
 restore_or_remove \
-    "$HYPR_DIR/yt-stream-workspace.conf" "$SNIPPET_MARKER" \
-    "$BACKUP_DIR/yt-stream-workspace.conf" "Hyprland snippet"
+    "$HYPR_DIR/yt-stream-workspace.lua" "$SNIPPET_MARKER" \
+    "$BACKUP_DIR/yt-stream-workspace.lua" "Hyprland module"
 
 rm -f "$HYPR_SOURCE_MARKER"
 

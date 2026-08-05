@@ -84,9 +84,9 @@ Diagnostic logs live separately under
 destroy the evidence needed to diagnose a failed start or self-test.
 
 Install-time ownership is separate. Markers record whether the installer
-created or replaced the executable, config, and Hyprland snippet; replacements
-have restorable backups. The source marker contains the exact line added to
-`hyprland.conf`.
+created or replaced the executable, config, and Hyprland module; replacements
+have restorable backups. The source marker contains the exact require line
+added to `hyprland.lua`.
 
 ## Upstream contracts
 

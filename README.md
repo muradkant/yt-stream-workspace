@@ -41,17 +41,17 @@ Installation writes:
 ```text
 ~/.local/bin/workspace-stream
 ~/.config/yt-stream-workspace/config
-~/.config/hypr/yt-stream-workspace.conf
+~/.config/hypr/yt-stream-workspace.lua
 ```
 
-With `--hypr-source`, it backs up `hyprland.conf`, appends the source line only
-when absent, and records ownership so `./uninstall.sh` removes only a line this
-installation added. Generated bindings use the actual `XDG_BIN_HOME`, and the
-source line uses the actual `XDG_CONFIG_HOME`; non-default XDG paths are
-supported.
+With `--hypr-source`, it backs up `hyprland.lua` (Hyprland 0.55+ replaced the
+hyprlang `.conf` format with Lua), appends `require("yt-stream-workspace")`
+only when absent, and records ownership so `./uninstall.sh` removes only a line
+this installation added. Generated bindings use the actual `XDG_BIN_HOME`, and
+the require line is path-independent; non-default XDG paths are supported.
 
 The installer records whether it created or replaced each managed file.
-Replaced executables and snippets are backed up and restored by uninstall. A
+Replaced executables and modules are backed up and restored by uninstall. A
 normal uninstall preserves the user configuration; `--purge` removes a created
 config or restores a replaced one:
 
